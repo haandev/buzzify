@@ -1,0 +1,31 @@
+{
+  "name": "buzzify",
+  "version": "0.0.2",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/haandev/buzzify"
+  },
+  "keywords": [
+    "worker",
+    "pool",
+    "orchestration"
+  ],
+  "author": "haandev",
+  "license": "MIT",
+  "homepage": "https://github.com/haandev/buzzify",
+  "description": "A fast, efficient, and easy-to-use TypeScript library for worker orchestration and pooling.",
+  "main": "./dist/buzzify.js",
+  "types": "./dist/buzzify.d.ts",
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  },
+  "dependencies": {
+    "@haandev/core": "^0.0.2"
+  }
+}
