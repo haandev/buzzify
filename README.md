@@ -29,17 +29,15 @@ npm install buzzify
 
 ```ts
 // on your worker.ts
-import { defineBee } from 'buzzify'
+import { defineBee, InferBeeApi } from 'buzzify'
 declare const self: Worker
 const bee = defineBee<{
-  WorkerMethods: {
-    add: {
-        args: [number, number]
-        return: number
-    }
+  workerHandlers: {
+    add: (a: number, b: number) => number
+    hi: () => Promise<void>
   }
-  Event: { log: [string] }
-  MainMethods: {  hello: (name: string) => Promise<string> }
+  events: { log: [string] }
+  mainHandlers: { hello: (name: string) => Promise<string> }
 }>(self)
 
 bee.handle('add', (a, b) => a + b)
@@ -48,6 +46,7 @@ bee.handle('hi', async () => {
 })
 
 bee.emit('log', 'Worker started')
+export type MyBeeApi = InferBeeApi<typeof bee>
 
 // on your main.ts
 import { useBee } from 'buzzify'
@@ -107,7 +106,7 @@ await worker.call('add', 1, 2)
 
 //when you are done, you can release the worker back to the pool
 pool.release(worker)
-````
+```
 ### Auto release by `using`
 ```ts
 if (true) {
@@ -115,7 +114,7 @@ if (true) {
     worker.call('add', 1, 2)
 }
 // here worker will be released back to the pool because of the `using` keyword
-````
+```
 
 ### To systems who has no `using` keyword
 ```ts
@@ -136,15 +135,21 @@ export type HiveEventsMap<M extends BeeApi> = {
   workerRemoved: (item: PoolItem<M>) => void
   workerCreated: (item: PoolItem<M>) => void
 }
-````
+```
 
 But the bee itself, has `events` accessor for EventListener instance which composed on bee instance. And its events are not predefined. You should define them on the BeeApi type.
 
 ```ts
 export type MyBeeApi = {
-  //...
-  Events: {
+  workerHandlers: {
+    add: (a: number, b: number) => number
+    hi: () => Promise<void>
+  }
+  events: {
     log: [string]
+  }
+  mainHandlers: {
+    hello: (name: string) => Promise<string>
   }
 }
 
