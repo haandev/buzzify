@@ -1,30 +1,30 @@
 import { EventListener, EventTupleToHandler } from '@haandev/core/event'
-type MethodShape = (...args: any[]) => Promise<any> | void
+
+type MethodShape<Input extends any[] = any[], Output = any> = (
+  ...args: Input
+) => Output
+type HasVoid<T> = Extract<T, void> extends never ? false : true
+type PromisifyMethodReturn<F extends (...args: any[]) => any> = (
+  ...args: Parameters<F>
+) => HasVoid<ReturnType<F>> extends true
+  ? Promise<Awaited<ReturnType<F>>> | void
+  : Promise<Awaited<ReturnType<F>>>
+
 type Methods = Record<string, MethodShape>
-type ApiMap<M extends Record<string, MethodShape>> = {
-  [K in keyof M]: {
-    args: Parameters<M[K]>
-    return: Awaited<ReturnType<M[K]>>
-  }
-}
-type Req<Args extends any[] = any[], Return = any> = {
+type MethodParts<Args extends any[] = any[], Return = any> = {
   args: Args
   return?: Return
 }
-type RequestMap = Record<string, Req>
 type EventMap = Record<string, any[]>
-type RequestHandler<M extends RequestMap> = {
-  [K in keyof M]?: (...args: M[K]['args']) => Promise<M[K]['return']>
-}
 
 type BeeApi<
-  R extends RequestMap = RequestMap,
+  W extends Methods = Methods,
   E extends EventMap = EventMap,
-  I extends Methods = Methods,
+  M extends Methods = Methods,
 > = {
-  WorkerMethods: R
-  Event: E
-  MainMethods: I
+  workerHandlers?: W
+  events?: E
+  mainHandlers?: M
 }
 
 /**
@@ -47,15 +47,17 @@ type BeeApi<
  *   api.emit('ready') // notify main thread
  *   ```
  */
-export function defineBee<
-  A extends BeeApi,
-  E extends A['Event'] = A['Event'],
-  R extends A['WorkerMethods'] = A['WorkerMethods'],
-  I extends A['MainMethods'] = A['MainMethods'],
-  AMap extends ApiMap<I> = ApiMap<I>,
->(worker: Worker) {
+export function defineBee<A extends BeeApi>(worker: Worker) {
+  type Events = NonNullable<A['events']>
+  type WorkerMethods = NonNullable<A['workerHandlers']>
+  type PromisifiedMethods = {
+    [key in keyof WorkerMethods]: PromisifyMethodReturn<WorkerMethods[key]>
+  }
+  type MainMethods = NonNullable<A['mainHandlers']>
+  type WorkerMethodArgsUnion = Parameters<WorkerMethods[keyof WorkerMethods]>
+
   let requestId = 100
-  const handlers: RequestHandler<R> = {}
+  const handlers: PromisifiedMethods = {} as PromisifiedMethods
   const callbacks = new Map<number, { resolve: Function; reject: Function }>()
   worker.addEventListener(
     'message',
@@ -64,13 +66,13 @@ export function defineBee<
         | {
             type: 'request'
             id: number | null
-            method: keyof R
-            args: R[keyof R]['args']
+            method: keyof WorkerMethods
+            args: MethodParts['args']
           }
         | {
             type: 'response'
             id: number
-            result: R[keyof R]['return']
+            result: MethodParts['return']
           }
       >,
     ) => {
@@ -79,7 +81,7 @@ export function defineBee<
           const { id, method, args } = event.data
           try {
             const handler = handlers[method]
-            const result = await handler?.(...args)
+            const result = await handler?.(...(args as WorkerMethodArgsUnion))
             if (id === null) return
             worker.postMessage({ type: 'response', id, result })
           } catch (error) {
@@ -119,9 +121,11 @@ export function defineBee<
      * method will be invoked when a corresponding request is received from the
      * main thread.
      */
-    handle: <K extends keyof R>(
+    handle: <K extends keyof WorkerMethods>(
       method: K,
-      fn: (...args: R[K]['args']) => Promise<R[K]['return']>,
+      fn: (
+        ...args: Parameters<WorkerMethods[K]>
+      ) => Promise<Awaited<ReturnType<WorkerMethods[K]>>>,
     ) => {
       handlers[method] = fn
       return api
@@ -130,7 +134,7 @@ export function defineBee<
      * Emits an event from the worker to the main thread. Useful for sending
      * progress updates, logs, or any custom notifications.
      */
-    emit: <K extends keyof E>(event: K, ...args: E[K]) => {
+    emit: <K extends keyof Events>(event: K, ...args: Events[K]) => {
       ;(worker as any).postMessage({ type: 'event', method: event, args })
     },
 
@@ -139,7 +143,10 @@ export function defineBee<
      * response. Use this for commands that do not return data but may emit
      * events handled via on/once/off.
      */
-    send: <K extends keyof R>(method: K, ...args: R[K]['args']) => {
+    send: <K extends keyof WorkerMethods>(
+      method: K,
+      ...args: Parameters<WorkerMethods[K]>
+    ) => {
       worker.postMessage({ type: 'worker-call', id: null, method, args })
     },
 
@@ -147,10 +154,10 @@ export function defineBee<
      * Calls an imperative function from the worker. Imperative functions are
      * functions that are on main thread
      */
-    call: <K extends keyof I>(
+    call: <K extends keyof MainMethods>(
       imperative: K,
-      ...args: Parameters<I[K]>
-    ): Promise<AMap[K]['return']> => {
+      ...args: Parameters<MainMethods[K]>
+    ): Promise<Awaited<ReturnType<MainMethods[K]>>> => {
       const callId = ++requestId
       worker.postMessage({
         type: 'request',
@@ -166,8 +173,7 @@ export function defineBee<
     // 💡 marker
     __api: null as unknown as A,
   }
-
-  api.handle('ping', async () => 'pong')
+  api.handle('ping', async () => 'pong' as any)
   return api
 }
 
@@ -178,13 +184,15 @@ export class ExposedBee<T extends BeeApi> {
     number,
     { resolve: Function; reject: Function }
   >()
-  private readonly _events = new EventListener<EventTupleToHandler<T['Event']>>()
+  private readonly _events = new EventListener<
+    EventTupleToHandler<NonNullable<T['events']>>
+  >()
   private readonly _worker: Worker
-  private readonly _handlers?: T['MainMethods']
+  private readonly _handlers?: T['mainHandlers']
 
   constructor(
     scriptURL: string | URL,
-    handlers?: T['MainMethods'],
+    handlers?: T['mainHandlers'],
     options?: WorkerOptions,
   ) {
     this._worker = new Worker(scriptURL, options)
@@ -235,13 +243,15 @@ export class ExposedBee<T extends BeeApi> {
    * Calls a method exposed by the worker and awaits its response. Returns a
    * Promise that resolves with the result or rejects on error.
    */
-  public async call<K extends keyof T['WorkerMethods']>(
+  public async call<K extends keyof NonNullable<T['workerHandlers']>>(
     method: K,
-    ...args: T['WorkerMethods'][K]['args']
-  ): Promise<T['WorkerMethods'][K]['return']> {
+    ...args: Parameters<NonNullable<T['workerHandlers']>[K]>
+  ): Promise<Awaited<ReturnType<NonNullable<T['workerHandlers']>[K]>>> {
     const id = ++this.requestId
     this.raw.postMessage({ type: 'request', id, method, args })
-    return new Promise((resolve, reject) => {
+    return new Promise<
+      Awaited<ReturnType<NonNullable<T['workerHandlers']>[K]>>
+    >((resolve, reject) => {
       this.callbacks.set(id, { resolve, reject })
     })
   }
@@ -250,9 +260,9 @@ export class ExposedBee<T extends BeeApi> {
    * response. Use this for commands that do not return data but may emit events
    * handled via on/once/off.
    */
-  public send<K extends keyof T['WorkerMethods']>(
+  public send<K extends keyof NonNullable<T['workerHandlers']>>(
     method: K,
-    ...args: T['WorkerMethods'][K]['args']
+    ...args: Parameters<NonNullable<T['workerHandlers']>[K]>
   ): void {
     this.raw.postMessage({ type: 'request', id: null, method, args })
   }
@@ -270,7 +280,7 @@ export class ExposedBee<T extends BeeApi> {
    * @returns 'pong' if the worker is responsive, otherwise throws an error.
    */
   public ping(): Promise<'pong'> {
-    return this.call('ping' as keyof T['WorkerMethods']) as Promise<'pong'>
+    return this.call('ping' as any, ...([] as any)) as Promise<'pong'>
   }
   /** Returns the raw worker instance. */
   public get raw() {
@@ -279,8 +289,7 @@ export class ExposedBee<T extends BeeApi> {
 }
 
 export type InferBeeApi<T> = T extends { __api: infer A } ? A : never
-interface ExposedWorkerWithRelease<T extends BeeApi>
-  extends ExposedBee<T> {
+interface ExposedWorkerWithRelease<T extends BeeApi> extends ExposedBee<T> {
   release: () => void
   [Symbol.dispose]: () => void
   [Symbol.asyncDispose]: () => Promise<void>
@@ -298,7 +307,7 @@ type PoolItem<T extends BeeApi> = {
  */
 export const useBee = <T extends BeeApi>(
   scriptURL: string | URL,
-  handlers?: T['MainMethods'],
+  handlers?: T['mainHandlers'],
   options?: WorkerOptions,
 ) => {
   return new ExposedBee<T>(scriptURL, handlers, options)
@@ -347,7 +356,7 @@ export class BeeHive<T extends BeeApi> {
   constructor(
     private readonly scriptURL: string | URL,
     private readonly config: { concurrency: number },
-    private readonly handlers?: T['MainMethods'],
+    private readonly handlers?: T['mainHandlers'],
     private readonly options?: WorkerOptions,
   ) {
     this.desiredPoolSize = { current: this.config.concurrency }
@@ -604,11 +613,14 @@ export class BeeHive<T extends BeeApi> {
  * This is a convenience factory function that simplifies creating a worker pool
  * without dealing with the WorkerPool class directly.
  */
-export function createBeeHive<T extends BeeApi>(scriptURL: string | URL, options: {
-  concurrency: number
-  handlers?: T['MainMethods']
-  workerOptions?: WorkerOptions
-}) {
+export function createBeeHive<T extends BeeApi>(
+  scriptURL: string | URL,
+  options: {
+    concurrency: number
+    handlers?: T['mainHandlers']
+    workerOptions?: WorkerOptions
+  },
+) {
   return new BeeHive<T>(
     scriptURL,
     { concurrency: options.concurrency },
